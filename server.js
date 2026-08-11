@@ -5,7 +5,7 @@ const app = express();
 app.use(express.json());
 
 const PEPSUP_BASE = 'https://api.pepsup.com/api/v1';
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3.6-flash';
 
 const TOOLS = [
   {
