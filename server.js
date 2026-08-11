@@ -5,13 +5,13 @@ const app = express();
 app.use(express.json());
 
 const PEPSUP_BASE = 'https://api.pepsup.com/api/v1';
-const ANTHROPIC_MODEL = 'claude-sonnet-4-6';
+const GEMINI_MODEL = 'gemini-2.5-flash';
 
 const TOOLS = [
   {
     name: 'get_evenements',
     description: "Retourne les événements de l'association, avec filtres optionnels.",
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         page: { type: 'integer', description: 'Numéro de page (défaut 0)' },
@@ -26,7 +26,7 @@ const TOOLS = [
   {
     name: 'get_dossiers_adhesions',
     description: "Retourne les dossiers d'adhésion de la période active, avec filtres optionnels.",
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         page: { type: 'integer' },
@@ -38,7 +38,7 @@ const TOOLS = [
   {
     name: 'get_contacts',
     description: "Retourne les contacts/membres de l'association, avec filtres optionnels.",
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         city: { type: 'string' },
@@ -50,7 +50,7 @@ const TOOLS = [
   {
     name: 'get_commandes_boutique',
     description: 'Retourne les commandes de la boutique en ligne, avec filtres optionnels.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         page: { type: 'integer' },
@@ -93,24 +93,20 @@ async function callPepsUp(toolName, input) {
   return res.json();
 }
 
-async function askClaude(conversation) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+async function askGemini(conversation) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
+  const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': process.env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01'
-    },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 1000,
-      system: SYSTEM_PROMPT(),
-      tools: TOOLS,
-      messages: conversation
+      system_instruction: { parts: [{ text: SYSTEM_PROMPT() }] },
+      contents: conversation,
+      tools: [{ functionDeclarations: TOOLS }]
     })
   });
 
-  if (!res.ok) throw new Error(`Appel Claude API échoué (${res.status}): ${await res.text()}`);
+  if (!res.ok) throw new Error(`Appel Gemini API échoué (${res.status}): ${await res.text()}`);
   return res.json();
 }
 
@@ -118,29 +114,30 @@ app.post('/ask', async (req, res) => {
   const question = req.body.question;
   if (!question) return res.status(400).json({ error: 'Champ "question" manquant.' });
 
-  const conversation = [{ role: 'user', content: question }];
+  const conversation = [{ role: 'user', parts: [{ text: question }] }];
   const toolCallsLog = [];
 
   try {
     for (let i = 0; i < 6; i++) {
-      const data = await askClaude(conversation);
-      const blocks = data.content || [];
-      const toolUses = blocks.filter((b) => b.type === 'tool_use');
-      const text = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+      const data = await askGemini(conversation);
+      const parts = data.candidates?.[0]?.content?.parts || [];
+      const functionCalls = parts.filter((p) => p.functionCall);
+      const text = parts.filter((p) => p.text).map((p) => p.text).join('\n').trim();
 
-      conversation.push({ role: 'assistant', content: blocks });
+      conversation.push({ role: 'model', parts });
 
-      if (toolUses.length === 0) {
+      if (functionCalls.length === 0) {
         return res.json({ answer: text, toolCalls: toolCallsLog });
       }
 
-      const toolResults = [];
-      for (const tu of toolUses) {
-        toolCallsLog.push({ tool: tu.name, input: tu.input });
-        const result = await callPepsUp(tu.name, tu.input);
-        toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(result) });
+      const responseParts = [];
+      for (const fc of functionCalls) {
+        const { name, args } = fc.functionCall;
+        toolCallsLog.push({ tool: name, input: args });
+        const result = await callPepsUp(name, args);
+        responseParts.push({ functionResponse: { name, response: result } });
       }
-      conversation.push({ role: 'user', content: toolResults });
+      conversation.push({ role: 'user', parts: responseParts });
     }
     res.status(500).json({ error: "L'agent n'a pas conclu après plusieurs itérations." });
   } catch (err) {
